@@ -1,0 +1,12 @@
+Flask
+flask-cors
+joblib
+numpy
+networkx
+folium
+osmnx
+tensorflow
+ortools
+scikit-learn
+pickle-mixin
+pandas
