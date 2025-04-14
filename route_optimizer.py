@@ -131,53 +131,12 @@ def create_synthetic_network():
     
     print(f"Created synthetic grid network with {len(G.nodes)} nodes and {len(G.edges)} edges")
     return G
+
+
 class MLTrafficPredictor:
     def __init__(self, edge_ids, num_time_periods=24):
         self.edge_ids = edge_ids
         self.model = None
-        self.train_synthetic_model(num_time_periods)
-    
-    def train_synthetic_model(self, num_time_periods):
-        """Train a model on synthetic data with realistic patterns"""
-        X_train = []  
-        y_train = []  
-        
-        start_date = datetime(2023, 1, 1)
-        for day in range(7):  
-            for hour in range(24):  
-                current_time = start_date + timedelta(days=day, hours=hour)
-                
-                time_features = [
-                    hour,                           
-                    current_time.weekday(),         
-                    1 if hour in [7, 8, 9, 17, 18, 19] else 0, 
-                    1 if current_time.weekday() < 5 else 0  
-                ]
-                
-                edge_multipliers = []
-                for e in range(len(self.edge_ids)):
-                    if hour in [7, 8, 9]:  
-                        base_mult = 0.7
-                    elif hour in [17, 18, 19]:  
-                        base_mult = 0.6
-                    elif hour in [10, 11, 12, 13, 14, 15, 16]:  
-                        base_mult = 0.9
-                    else:  
-                        base_mult = 1.2
-                    
-                    variation = np.random.normal(0, 0.1)
-                    if current_time.weekday() >= 5:  
-                        base_mult = min(1.3, base_mult + 0.2)  
-                    
-                    multiplier = max(0.4, min(1.5, base_mult + variation))
-                    edge_multipliers.append(multiplier)
-                
-                X_train.append(time_features)
-                y_train.append(edge_multipliers)
-        
-        self.model = RandomForestRegressor(n_estimators=100, random_state=42)
-        self.model.fit(X_train, y_train)
-        print("Traffic prediction model trained on synthetic data")
     
     def predict_for_time(self, hour, day_of_week):
         """Predict traffic multipliers for a specific time"""
@@ -204,13 +163,11 @@ class MLTrafficPredictor:
             
         return self.predict_for_time(hour, day)
 
-    def save(self, filepath):
-        joblib.dump(self.model, filepath)
-    
     @staticmethod
     def load(filepath, edge_ids):
-        predictor = MLTrafficPredictor(edge_ids, num_time_periods=24)
+        predictor = MLTrafficPredictor(edge_ids)
         predictor.model = joblib.load(filepath)
+        print(f"Traffic prediction model loaded from {filepath}")
         return predictor
 
 
@@ -218,36 +175,6 @@ class RoadCongestionClassifier:
     def __init__(self, G):
         self.G = G
         self.model = None
-        self.train_synthetic_model()
-    
-    def train_synthetic_model(self):
-        """Train a model to classify roads by congestion likelihood"""
-        X_train = []
-        y_train = []
-        
-        for u, v, data in self.G.edges(data=True):
-            features = [
-                data.get('length', 0) / 1000,  
-                1 if data.get('highway') == 'primary' else 0,
-                1 if data.get('highway') == 'secondary' else 0,
-                1 if data.get('highway') == 'tertiary' else 0,
-                data.get('lanes', 1) if isinstance(data.get('lanes'), int) else 1,
-                1 if 'oneway' in data and data['oneway'] else 0
-            ]
-            
-            if data.get('highway') == 'primary':
-                congestion = np.random.choice([0, 1, 2], p=[0.2, 0.3, 0.5])
-            elif data.get('highway') == 'secondary':
-                congestion = np.random.choice([0, 1, 2], p=[0.3, 0.5, 0.2])
-            else:
-                congestion = np.random.choice([0, 1, 2], p=[0.6, 0.3, 0.1])
-                
-            X_train.append(features)
-            y_train.append(congestion)
-        
-        self.model = RandomForestClassifier(n_estimators=50, random_state=42)
-        self.model.fit(X_train, y_train)
-        print("Road congestion classifier trained on synthetic data")
     
     def classify_roads(self):
         """Classify all roads by congestion risk"""
@@ -268,65 +195,17 @@ class RoadCongestionClassifier:
             
         return congestion_risk
 
-    def save(self, filepath):
-        joblib.dump(self.model, filepath)
-    
     @staticmethod
     def load(filepath, G):
         classifier = RoadCongestionClassifier(G)
         classifier.model = joblib.load(filepath)
+        print(f"Road congestion classifier loaded from {filepath}")
         return classifier
 
 class TravelTimePredictor:
     def __init__(self, G):
         self.G = G
         self.model = None
-        self.train_synthetic_model()
-    
-    def train_synthetic_model(self):
-        """Train a model to predict travel times with synthetic data"""
-        X_train = []
-        y_train = []
-        
-        for u, v, data in self.G.edges(data=True):
-            for scenario in range(10): 
-                # Road features
-                distance = data.get('length', 0) / 1000  
-                base_speed = data.get('base_speed', 40.0)  
-                
-                hour = np.random.randint(0, 24)
-                is_rush_hour = 1 if hour in [7, 8, 9, 17, 18, 19] else 0
-                is_weekend = np.random.choice([0, 1], p=[0.7, 0.3])
-                
-                if is_rush_hour and not is_weekend:
-                    traffic_mult = np.random.uniform(0.5, 0.8)  
-                elif is_weekend:
-                    traffic_mult = np.random.uniform(0.9, 1.3)  
-                else:
-                    traffic_mult = np.random.uniform(0.7, 1.0)  
-                
-                features = [
-                    distance,
-                    base_speed,
-                    1 if data.get('highway') == 'primary' else 0,
-                    1 if data.get('highway') == 'secondary' else 0,
-                    1 if data.get('highway') == 'tertiary' else 0,
-                    hour,
-                    is_rush_hour,
-                    is_weekend
-                ]
-                
-                actual_speed = base_speed * traffic_mult
-                base_time = (distance / actual_speed) * 60  
-                noise = np.random.normal(0, base_time * 0.1)  
-                travel_time = max(0.1, base_time + noise)
-                
-                X_train.append(features)
-                y_train.append(travel_time)
-        
-        self.model = GradientBoostingRegressor(n_estimators=100, random_state=42)
-        self.model.fit(X_train, y_train)
-        print("Travel time prediction model trained on synthetic data")
     
     def predict_travel_time(self, u, v, hour, is_weekend=False):
         """Predict travel time between two nodes"""
@@ -344,23 +223,66 @@ class TravelTimePredictor:
             1 if data.get('highway') == 'secondary' else 0,
             1 if data.get('highway') == 'tertiary' else 0,
             hour,
-            1 if hour in [7, 8, 9, 17, 18, 19] else 0,  # Rush hour flag
+            1 if hour in [7, 8, 9, 17, 18, 19] else 0, 
             1 if is_weekend else 0
         ]
         
         travel_time = self.model.predict([features])[0]
         return travel_time
 
-    def save(self, filepath):
-        joblib.dump(self.model, filepath)
-    
     @staticmethod
     def load(filepath, G):
         predictor = TravelTimePredictor(G)
         predictor.model = joblib.load(filepath)
+        print(f"Travel time prediction model loaded from {filepath}")
         return predictor
     
+def user_location_selection_feature(G):
+    center_y = G.nodes[list(G.nodes)[0]]['y']
+    center_x = G.nodes[list(G.nodes)[0]]['x']
     
+    m = folium.Map(location=[center_y, center_x], zoom_start=13)
+    
+    display(m)
+    
+    user_selected_coords = [
+        (30.74, 76.78), 
+        (30.73, 76.77),
+        (30.72, 76.79),
+        # etc.
+    ]
+    
+    selected_nodes = []
+    for lat, lon in user_selected_coords:
+        nearest_node = ox.distance.nearest_nodes(G, lon, lat)
+        selected_nodes.append(nearest_node)
+    
+    depot = selected_nodes[0]
+    all_stops = selected_nodes
+    
+    edge_ids = list(G.edges())
+    traffic_predictor = MLTrafficPredictor.load("traffic_model.pkl", edge_ids)
+    travel_predictor = TravelTimePredictor.load("travel_time_predictor.pkl", G)
+    congestion_classifier = RoadCongestionClassifier.load("congestion_classifier.pkl", G)
+    
+    now = datetime.now()
+    hour = now.hour
+    is_weekend = now.weekday() >= 5  
+    
+    traffic_multipliers = traffic_predictor.predict_for_time(hour, now.weekday())
+    congestion_risk = congestion_classifier.classify_roads()
+    
+    router = EnhancedDynamicRouter(G, edge_ids, travel_predictor)
+    router.update_edge_speeds(traffic_multipliers)
+    
+    route = router.optimize_route(all_stops)
+    
+    time_matrix = router.calculate_time_matrix(all_stops, hour=hour, is_weekend=is_weekend)
+    
+    route_map = create_enhanced_route_map(G, all_stops, route, f"User_Selected_Route_{hour}h", congestion_risk)
+    
+    return route_map
+
 class EnhancedDynamicRouter:
     def __init__(self, G, edge_ids, travel_predictor):
         self.G = G
@@ -607,6 +529,35 @@ def create_enhanced_route_map(G, stops, route, time_period_name, congestion_risk
     m.get_root().html.add_child(folium.Element(legend_html))
     
     return m
+def get_or_load_road_network():
+    """Get road network from cache or download if not available"""
+    GRAPH_CACHE_FILE = 'saved_maps/chandigarh_network.pkl'
+    
+    # Create directory if it doesn't exist
+    os.makedirs('saved_maps', exist_ok=True)
+    
+    # Try to load cached graph
+    if os.path.exists(GRAPH_CACHE_FILE):
+        try:
+            print(f"Loading road network from {GRAPH_CACHE_FILE}")
+            G = nx.read_gpickle(GRAPH_CACHE_FILE)
+            print(f"Loaded road network with {len(G.nodes)} nodes and {len(G.edges)} edges")
+            return G
+        except Exception as e:
+            print(f"Error loading cached road network: {str(e)}")
+    
+    # Download and create new graph
+    print("Downloading road network...")
+    G = get_simplified_road_network()
+    
+    # Save for future use
+    try:
+        print(f"Saving road network to {GRAPH_CACHE_FILE}")
+        nx.write_gpickle(G, GRAPH_CACHE_FILE)
+    except Exception as e:
+        print(f"Error saving road network: {str(e)}")
+    
+    return G
 
 def create_route_focused_map(G, stops, route, time_matrix):
     """Create a map focused just on the optimal route with time estimates"""
@@ -763,72 +714,3 @@ def display_route_details(G, route, time_matrix):
     print("==================================")
     
     return total_time
-
-def test_end_to_end(hour=12, is_weekend=False):
-    print(f"\n--- End-to-End System Test (Hour: {hour}, Weekend: {is_weekend}) ---")
-    
-    print("1. Loading road network...")
-    G = get_simplified_road_network()
-    G = add_base_speeds_to_graph(G)
-    
-    print("2. Setting up delivery stops...")
-    nodes = list(G.nodes())
-    depot = nodes[0]
-    delivery_stops = random.sample(nodes[1:], min(5, len(nodes)-1))
-    all_stops = [depot] + delivery_stops
-    stops = all_stops  
-    
-    if not check_graph_connectivity(G, stops):
-        print("Attempting to find alternative nodes for problematic stops...")
-        new_stops = []
-        
-        for stop in stops:
-            if stop in G:  
-                cc = nx.node_connected_component(G.to_undirected(), stop)
-                if len(cc) < 10:  
-                    alt_node = find_nearest_accessible_node(G, stop)
-                    if alt_node:
-                        new_stops.append(alt_node)
-                    else:
-                        new_stops.append(stop)  
-                else:
-                    new_stops.append(stop)  
-            else:
-                print(f"WARNING: Stop {stop} not found in graph!")
-        
-        if new_stops != stops:
-            print("Using alternative stops to ensure graph connectivity")
-            stops = new_stops
-            all_stops = stops  # Update all_stops as well
-    
-    print("3. Setting up ML models...")
-    edge_ids = list(G.edges())
-    traffic_predictor = MLTrafficPredictor(edge_ids)
-    congestion_classifier = RoadCongestionClassifier(G)
-    travel_predictor = TravelTimePredictor(G)
-    congestion_risk = congestion_classifier.classify_roads()
-    
-    print("4. Predicting traffic conditions...")
-    traffic_multipliers = traffic_predictor.predict_for_time(hour, 1 if not is_weekend else 6)
-    
-    print("5. Setting up router...")
-    router = EnhancedDynamicRouter(G, edge_ids, travel_predictor)
-    router.update_edge_speeds(traffic_multipliers)
-    
-    print("6. Optimizing route...")
-    route = router.optimize_route(all_stops)
-    
-    time_matrix = router.calculate_time_matrix(all_stops, hour=hour, is_weekend=is_weekend)
-    total_travel_time = display_route_details(G, route, time_matrix)
-    route_map = create_route_focused_map(G, all_stops, route, time_matrix)
-    
-    if route:
-        time_period_name = f"Hour_{hour}_{'Weekend' if is_weekend else 'Weekday'}"
-        route_map = create_enhanced_route_map(G, all_stops, route, time_period_name, congestion_risk)
-        map_filename = f"end_to_end_route_{time_period_name}.html"
-        route_map.save(map_filename)
-        print(f"7. Route visualization saved to {map_filename}")
-        return True
-    else:
-        print("7. Failed to find a route")
-        return False

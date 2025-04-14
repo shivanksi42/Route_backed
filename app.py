@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import joblib
@@ -10,16 +9,20 @@ import numpy as np
 import networkx as nx
 from datetime import datetime
 from route_optimizer import (
+    get_or_load_road_network,
     get_simplified_road_network,
+    create_synthetic_network,
     add_base_speeds_to_graph,
     MLTrafficPredictor,
     RoadCongestionClassifier,
     TravelTimePredictor,
     EnhancedDynamicRouter,
+    user_location_selection_feature,
     check_graph_connectivity,
     find_nearest_accessible_node,
     create_enhanced_route_map,
-    create_route_focused_map
+    create_route_focused_map,
+    display_route_details
 )
 
 app = Flask(__name__)
@@ -55,7 +58,14 @@ def initialize_system():
     
     if G is None:
         
-        G = get_simplified_road_network()
+        # Get road network with better error handling
+        try:
+            G = get_or_load_road_network()
+        except Exception as e:
+            print(f"Error obtaining road network: {str(e)}")
+            print("Falling back to synthetic network")
+            G = create_synthetic_network()
+            
         G = add_base_speeds_to_graph(G)
         edge_ids = list(G.edges())
 
@@ -136,6 +146,441 @@ def get_network_stats():
         },
         "road_types": road_types
     })
+    
+    
+    
+# Add these routes to the Flask backend
+
+@app.route('/api/map/initial', methods=['GET'])
+def get_initial_map():
+    """Return an initial map centered on the network"""
+    system = initialize_system()
+    G = system["G"]
+    
+    # Calculate network center 
+    lat_values = [data['y'] for _, data in G.nodes(data=True) if 'y' in data]
+    lon_values = [data['x'] for _, data in G.nodes(data=True) if 'x' in data]
+    
+    if not lat_values or not lon_values:
+        # Default center if no nodes with coordinates'        
+        center_lat, center_lon = 0, 0
+    else:
+        center_lat = sum(lat_values) / len(lat_values)
+        center_lon = sum(lon_values) / len(lon_values)
+    
+    # Create a basic map centered on the network
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=13)
+    
+    # Add a sample of network nodes for reference (limit to avoid heavy map)
+    node_sample = random.sample(list(G.nodes()), min(100, len(G.nodes())))
+    
+    for node_id in node_sample:
+        node_data = G.nodes[node_id]
+        if 'y' in node_data and 'x' in node_data:
+            folium.CircleMarker(
+                location=[node_data['y'], node_data['x']],
+                radius=2,
+                color='blue',
+                fill=True,
+                fill_opacity=0.7,
+                popup=f"Node ID: {node_id}"
+            ).add_to(m)
+    
+    # Add JavaScript to handle click events on the map
+# Add JavaScript to handle click events on the map with visual feedback
+    click_script = """
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        var map = document.querySelector('.folium-map');
+        
+        // Ensure map exists and has been initialized
+        if (!map || !map._leaflet_id) {
+            console.error('Map element not found or not initialized');
+            return;
+        }
+        
+        // Access the Leaflet map instance
+        var leafletMap = window.L.DomUtil.get('map')._leaflet_map || map._leaflet;
+        
+        // Add click event listener to the map with clear visual feedback
+        leafletMap.on('click', function(e) {
+            // Get lat/lon from the click event
+            var lat = e.latlng.lat;
+            var lon = e.latlng.lng;
+            
+            // Add a marker to show the selected point
+            var marker = L.marker([lat, lon], {
+                icon: L.divIcon({
+                    className: 'selected-node-marker',
+                    html: '<div style="background-color: red; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white;"></div>'
+                })
+            }).addTo(leafletMap);
+            
+            // Send message to parent window with node selection info
+            window.parent.postMessage({
+                type: 'NODE_SELECTED',
+                data: {
+                    lat: lat,
+                    lon: lon
+                }
+            }, '*');
+            
+            // Show visual feedback about the selection
+            var popup = L.popup()
+                .setLatLng(e.latlng)
+                .setContent('<p>Point selected at ' + lat.toFixed(6) + ', ' + lon.toFixed(6) + '</p>')
+                .openOn(leafletMap);
+                
+            // Optional: Make an API call to get nearby nodes
+            fetch('/api/network/nearby-nodes?lat=' + lat + '&lon=' + lon)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.nodes.length > 0) {
+                        // Show closest node
+                        var closestNode = data.nodes[0];
+                        L.circleMarker([closestNode.lat, closestNode.lon], {
+                            radius: 8,
+                            color: 'blue',
+                            fillColor: '#3186cc',
+                            fillOpacity: 0.7
+                        }).addTo(leafletMap)
+                        .bindPopup('Selected Node ID: ' + closestNode.id)
+                        .openPopup();
+                    }
+                })
+                .catch(error => console.error('Error fetching nearby nodes:', error));
+        });
+    });
+    </script>
+    """
+
+
+    
+    m.get_root().html.add_child(folium.Element(click_script))
+    
+    # Save to temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.html') as tmp:
+        m.save(tmp.name)
+        tmp_filename = tmp.name
+    
+    return send_file(tmp_filename, mimetype='text/html')
+
+@app.route('/api/map/update-with-nodes', methods=['POST'])
+def update_map_with_nodes():
+    """Update map to show search results"""
+    system = initialize_system()
+    G = system["G"]
+    
+    data = request.json
+    nodes = data.get('nodes', [])
+    
+    if not nodes:
+        return jsonify({
+            "error": "No nodes provided",
+            "success": False
+        }), 400
+    
+    # Calculate map center based on provided nodes
+    lat_values = [node['lat'] for node in nodes if 'lat' in node]
+    lon_values = [node['lon'] for node in nodes if 'lon' in node]
+    
+    if not lat_values or not lon_values:
+        # Default center if no nodes with coordinates
+        lat_values = [data['y'] for _, data in G.nodes(data=True) if 'y' in data]
+        lon_values = [data['x'] for _, data in G.nodes(data=True) if 'x' in data]
+        
+        if not lat_values or not lon_values:
+            center_lat, center_lon = 0, 0
+        else:
+            center_lat = sum(lat_values) / len(lat_values)
+            center_lon = sum(lon_values) / len(lon_values)
+    else:
+        center_lat = sum(lat_values) / len(lat_values)
+        center_lon = sum(lon_values) / len(lon_values)
+    
+    # Create map centered on search results
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=14)
+    
+    # Add the search result nodes with distinct styling
+    for node in nodes:
+        if 'lat' in node and 'lon' in node:
+            folium.CircleMarker(
+                location=[node['lat'], node['lon']],
+                radius=5,
+                color='red',
+                fill=True,
+                fill_opacity=0.7,
+                popup=f"Node ID: {node['id']}"
+            ).add_to(m)
+    
+    # Add some surrounding nodes for context
+    nearby_nodes = []
+    for node_id, data in G.nodes(data=True):
+        if 'y' in data and 'x' in data:
+            for search_node in nodes:
+                if 'lat' in search_node and 'lon' in search_node:
+                    dist = ((data['y'] - search_node['lat'])**2 + (data['x'] - search_node['lon'])**2)**0.5
+                    if dist <= 0.005:  # Small radius in coordinate units
+                        nearby_nodes.append((node_id, data))
+                        break
+    
+    # Sample some nearby nodes to avoid cluttering the map
+    nearby_sample = random.sample(nearby_nodes, min(30, len(nearby_nodes)))
+    
+    for node_id, node_data in nearby_sample:
+        folium.CircleMarker(
+            location=[node_data['y'], node_data['x']],
+            radius=2,
+            color='blue',
+            fill=True,
+            fill_opacity=0.3,
+            popup=f"Node ID: {node_id}"
+        ).add_to(m)
+    
+    # Add click handler for selecting nodes
+  # Add JavaScript to handle click events on the map with visual feedback
+    click_script = """
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        var map = document.querySelector('.folium-map');
+        
+        // Ensure map exists and has been initialized
+        if (!map || !map._leaflet_id) {
+            console.error('Map element not found or not initialized');
+            return;
+        }
+        
+        // Access the Leaflet map instance
+        var leafletMap = window.L.DomUtil.get('map')._leaflet_map || map._leaflet;
+        
+        // Add click event listener to the map with clear visual feedback
+        leafletMap.on('click', function(e) {
+            // Get lat/lon from the click event
+            var lat = e.latlng.lat;
+            var lon = e.latlng.lng;
+            
+            // Add a marker to show the selected point
+            var marker = L.marker([lat, lon], {
+                icon: L.divIcon({
+                    className: 'selected-node-marker',
+                    html: '<div style="background-color: red; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white;"></div>'
+                })
+            }).addTo(leafletMap);
+            
+            // Send message to parent window with node selection info
+            window.parent.postMessage({
+                type: 'NODE_SELECTED',
+                data: {
+                    lat: lat,
+                    lon: lon
+                }
+            }, '*');
+            
+            // Show visual feedback about the selection
+            var popup = L.popup()
+                .setLatLng(e.latlng)
+                .setContent('<p>Point selected at ' + lat.toFixed(6) + ', ' + lon.toFixed(6) + '</p>')
+                .openOn(leafletMap);
+                
+            // Optional: Make an API call to get nearby nodes
+            fetch('/api/network/nearby-nodes?lat=' + lat + '&lon=' + lon)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.nodes.length > 0) {
+                        // Show closest node
+                        var closestNode = data.nodes[0];
+                        L.circleMarker([closestNode.lat, closestNode.lon], {
+                            radius: 8,
+                            color: 'blue',
+                            fillColor: '#3186cc',
+                            fillOpacity: 0.7
+                        }).addTo(leafletMap)
+                        .bindPopup('Selected Node ID: ' + closestNode.id)
+                        .openPopup();
+                    }
+                })
+                .catch(error => console.error('Error fetching nearby nodes:', error));
+        });
+    });
+    </script>
+    """
+
+    
+    m.get_root().html.add_child(folium.Element(click_script))
+    
+    # Save to temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.html') as tmp:
+        m.save(tmp.name)
+        tmp_filename = tmp.name
+    
+    return send_file(tmp_filename, mimetype='text/html')
+
+@app.route('/api/map/update-route', methods=['POST'])
+def update_route_map():
+    """Update map to show selected depot and stops"""
+    system = initialize_system()
+    G = system["G"]
+    congestion_risk = system["congestion_risk"]
+    router = system["router"]
+    traffic_predictor = system["traffic_predictor"]
+    
+    data = request.json
+    stops = data.get('stops', [])
+    depot = data.get('depot')
+    hour = data.get('hour', 12)
+    day_of_week = data.get('day_of_week', 1)
+    is_weekend = day_of_week >= 5
+    
+    if not depot and not stops:
+        return jsonify({
+            "error": "No depot or stops provided",
+            "success": False
+        }), 400
+    
+    all_points = [depot] + stops if depot else stops
+    all_points = [p for p in all_points if p is not None]
+    
+    if len(all_points) < 1:
+        return jsonify({
+            "error": "Need at least one valid location",
+            "success": False
+        }), 400
+    
+    # Check connectivity and find valid nodes if needed
+    valid_points = []
+    for point in all_points:
+        if point in G:
+            valid_points.append(point)
+        else:
+            closest_node = find_nearest_accessible_node(G, point)
+            if closest_node:
+                valid_points.append(closest_node)
+    
+    if len(valid_points) < 1:
+        return jsonify({
+            "error": "No valid nodes found",
+            "success": False
+        }), 400
+    
+    # Update traffic for routing
+    traffic_multipliers = traffic_predictor.predict_for_time(hour, day_of_week)
+    router.update_edge_speeds(traffic_multipliers)
+    
+    # Generate a route if we have more than one point
+    route = None
+    if len(valid_points) > 1:
+        route = router.optimize_route(valid_points)
+    
+    # Create map
+    if route:
+        time_period_name = f"Hour_{hour}_{'Weekend' if is_weekend else 'Weekday'}"
+        route_map = create_enhanced_route_map(G, valid_points, route, time_period_name, congestion_risk)
+    else:
+        # Just create a map showing the points without a route
+        lat_values = [G.nodes[p]['y'] for p in valid_points if p in G.nodes()]
+        lon_values = [G.nodes[p]['x'] for p in valid_points if p in G.nodes()]
+        
+        if not lat_values or not lon_values:
+            return jsonify({
+                "error": "No valid coordinates found for selected nodes",
+                "success": False
+            }), 400
+        
+        center_lat = sum(lat_values) / len(lat_values)
+        center_lon = sum(lon_values) / len(lon_values)
+        
+        route_map = folium.Map(location=[center_lat, center_lon], zoom_start=14)
+        
+        # Add markers for depot and stops
+        for i, point_id in enumerate(valid_points):
+            if point_id in G.nodes():
+                color = 'green' if i == 0 and depot else 'blue'
+                folium.CircleMarker(
+                    location=[G.nodes[point_id]['y'], G.nodes[point_id]['x']],
+                    radius=7,
+                    color=color,
+                    fill=True,
+                    fill_opacity=0.7,
+                    popup=f"{'Depot' if i == 0 and depot else 'Stop'} ID: {point_id}"
+                ).add_to(route_map)
+    
+    # Add click handler for selecting nodes
+# Add JavaScript to handle click events on the map with visual feedback
+    click_script = """
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        var map = document.querySelector('.folium-map');
+        
+        // Ensure map exists and has been initialized
+        if (!map || !map._leaflet_id) {
+            console.error('Map element not found or not initialized');
+            return;
+        }
+        
+        // Access the Leaflet map instance
+        var leafletMap = window.L.DomUtil.get('map')._leaflet_map || map._leaflet;
+        
+        // Add click event listener to the map with clear visual feedback
+        leafletMap.on('click', function(e) {
+            // Get lat/lon from the click event
+            var lat = e.latlng.lat;
+            var lon = e.latlng.lng;
+            
+            // Add a marker to show the selected point
+            var marker = L.marker([lat, lon], {
+                icon: L.divIcon({
+                    className: 'selected-node-marker',
+                    html: '<div style="background-color: red; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white;"></div>'
+                })
+            }).addTo(leafletMap);
+            
+            // Send message to parent window with node selection info
+            window.parent.postMessage({
+                type: 'NODE_SELECTED',
+                data: {
+                    lat: lat,
+                    lon: lon
+                }
+            }, '*');
+            
+            // Show visual feedback about the selection
+            var popup = L.popup()
+                .setLatLng(e.latlng)
+                .setContent('<p>Point selected at ' + lat.toFixed(6) + ', ' + lon.toFixed(6) + '</p>')
+                .openOn(leafletMap);
+                
+            // Optional: Make an API call to get nearby nodes
+            fetch('/api/network/nearby-nodes?lat=' + lat + '&lon=' + lon)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.nodes.length > 0) {
+                        // Show closest node
+                        var closestNode = data.nodes[0];
+                        L.circleMarker([closestNode.lat, closestNode.lon], {
+                            radius: 8,
+                            color: 'blue',
+                            fillColor: '#3186cc',
+                            fillOpacity: 0.7
+                        }).addTo(leafletMap)
+                        .bindPopup('Selected Node ID: ' + closestNode.id)
+                        .openPopup();
+                    }
+                })
+                .catch(error => console.error('Error fetching nearby nodes:', error));
+        });
+    });
+    </script>
+    """
+
+    m.get_root().html.add_child(folium.Element(click_script))
+    
+    # Save to temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.html') as tmp:
+        route_map.save(tmp.name)
+        tmp_filename = tmp.name
+    
+    return send_file(tmp_filename, mimetype='text/html')    
+    
 
 @app.route('/api/network/nodes', methods=['GET'])
 def get_network_nodes():
@@ -298,6 +743,17 @@ def optimize_route():
         end_idx = all_stops.index(end_node) if end_node in all_stops else i+1
         
         segment_time = time_matrix[start_idx][end_idx]
+        
+        # Handle unrealistic travel times as shown in display_route_details from second code
+        if segment_time > 1000:  # Unrealistic travel time
+            start_lat = G.nodes[start_node]['y']
+            start_lon = G.nodes[start_node]['x']
+            end_lat = G.nodes[end_node]['y']  
+            end_lon = G.nodes[end_node]['x']
+            
+            dist_km = ((start_lat - end_lat)**2 + (start_lon - end_lon)**2)**0.5 * 111
+            segment_time = (dist_km / 30) * 60  # Estimate based on distance
+            
         total_time += segment_time
         
         segments.append({
@@ -527,13 +983,11 @@ def get_nearby_nodes():
                     "lat": float(data['y']),
                     "lon": float(data['x']),
                     "distance": float(dist),
-                    "distance_km": float(dist * 111)  # Rough conversion to km
+                    "distance_km": float(dist * 111) 
                 })
     
-    # Sort by distance
     nearby_nodes.sort(key=lambda x: x["distance"])
     
-    # Limit results
     nearby_nodes = nearby_nodes[:limit]
     
     return jsonify({
@@ -556,10 +1010,8 @@ def get_congestion_hotspots():
     
     limit = int(request.args.get('limit', 10))
     
-    # Find high-risk road segments
     high_risk_edges = [(u, v) for (u, v), risk in congestion_risk.items() if risk == 2]
     
-    # Group by node to find hotspot areas (intersections with multiple high-risk roads)
     node_risk_count = {}
     for u, v in high_risk_edges:
         if u in node_risk_count:
@@ -572,7 +1024,6 @@ def get_congestion_hotspots():
         else:
             node_risk_count[v] = 1
     
-    # Sort nodes by risk count
     hotspot_nodes = sorted(node_risk_count.items(), key=lambda x: x[1], reverse=True)[:limit]
     
     hotspots = []
@@ -583,7 +1034,7 @@ def get_congestion_hotspots():
                 "lat": float(G.nodes[node_id].get('y', 0)),
                 "lon": float(G.nodes[node_id].get('x', 0)),
                 "high_risk_road_count": risk_count,
-                "connected_roads": list(G.edges(node_id))[:5]  # Limit to 5 connected roads
+                "connected_roads": list(G.edges(node_id))[:5]  
             })
     
     return jsonify({
@@ -597,7 +1048,6 @@ def reload_system():
     """Force reload of the road network and models (admin use)"""
     global G, edge_ids, traffic_predictor, congestion_classifier, travel_predictor, router, congestion_risk
     
-    # Clear all cached variables
     G = None
     edge_ids = None
     traffic_predictor = None
@@ -606,7 +1056,6 @@ def reload_system():
     router = None
     congestion_risk = None
     
-    # Reinitialize
     system = initialize_system()
     
     return jsonify({
@@ -616,8 +1065,78 @@ def reload_system():
         "network_edges": len(system["G"].edges())
     })
 
+@app.route('/api/user-location', methods=['POST'])
+def user_location_selection():
+    """Process user-selected locations for routing"""
+    system = initialize_system()
+    G = system["G"]
+    router = system["router"]
+    travel_predictor = system["travel_predictor"]
+    traffic_predictor = system["traffic_predictor"]
+    congestion_risk = system["congestion_risk"]
+    
+    data = request.json
+    locations = data.get('locations', [])
+    hour = data.get('hour', datetime.now().hour)
+    day_of_week = data.get('day_of_week', datetime.now().weekday())
+    is_weekend = day_of_week >= 5
+    
+    if not locations or len(locations) < 2:
+        return jsonify({
+            "error": "At least 2 locations are required",
+            "success": False
+        }), 400
+    
+    # Find nearest nodes to selected coordinates
+    selected_nodes = []
+    for loc in locations:
+        lat = loc.get('lat')
+        lon = loc.get('lon')
+        if lat is None or lon is None:
+            continue
+            
+        # Find nearest node
+        nearest_node = None
+        min_dist = float('inf')
+        for node_id, data in G.nodes(data=True):
+            if 'y' in data and 'x' in data:
+                dist = ((data['y'] - lat)**2 + (data['x'] - lon)**2)**0.5
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_node = node_id
+        
+        if nearest_node:
+            selected_nodes.append(nearest_node)
+    
+    if len(selected_nodes) < 2:
+        return jsonify({
+            "error": "Could not map at least 2 locations to network nodes",
+            "success": False
+        }), 400
+    
+    # Update traffic conditions
+    traffic_multipliers = traffic_predictor.predict_for_time(hour, day_of_week)
+    router.update_edge_speeds(traffic_multipliers)
+    
+    route = router.optimize_route(selected_nodes)
+    
+    if not route:
+        return jsonify({
+            "error": "Failed to find a valid route between selected locations",
+            "success": False
+        }), 400
+    
+    time_matrix = router.calculate_time_matrix(selected_nodes, hour=hour, is_weekend=is_weekend)
+    
+    time_period_name = f"User_Selected_Route_{hour}h"
+    route_map = create_enhanced_route_map(G, selected_nodes, route, time_period_name, congestion_risk)
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.html') as tmp:
+        route_map.save(tmp.name)
+        tmp_filename = tmp.name
+    
+    return send_file(tmp_filename, mimetype='text/html')
+
 if __name__ == '__main__':
     initialize_system()
-    app.run(debug=True, host='0.0.0.0', port=5000)
-    
-    
+    app.run(debug=True, host='0.0.0.0', port=5001)
