@@ -1,12 +1,12 @@
 Flask
 flask-cors
-joblib
-numpy
+joblib==1.4.2
+numpy==2.0.0
 networkx
 folium
 osmnx
 tensorflow
 ortools
-scikit-learn
+scikit-learn==1.6.1
 pickle-mixin
-pandas
+pandas==2.2.3
