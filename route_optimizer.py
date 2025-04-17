@@ -243,7 +243,6 @@ def user_location_selection_feature(G):
     
     m = folium.Map(location=[center_y, center_x], zoom_start=13)
     
-    display(m)
     
     user_selected_coords = [
         (30.74, 76.78), 
@@ -533,31 +532,34 @@ def get_or_load_road_network():
     """Get road network from cache or download if not available"""
     GRAPH_CACHE_FILE = 'saved_maps/chandigarh_network.pkl'
     
-    
+    # Create directory if it doesn't exist
     os.makedirs('saved_maps', exist_ok=True)
     
-    
+    # Try to load cached graph
     if os.path.exists(GRAPH_CACHE_FILE):
         try:
             print(f"Loading road network from {GRAPH_CACHE_FILE}")
-            G = nx.readwrite.gpickle.read_gpickle(GRAPH_CACHE_FILE)
+            with open(GRAPH_CACHE_FILE, 'rb') as f:
+                G = pickle.load(f)
             print(f"Loaded road network with {len(G.nodes)} nodes and {len(G.edges)} edges")
             return G
         except Exception as e:
             print(f"Error loading cached road network: {str(e)}")
     
-    
+    # Download and create new graph
     print("Downloading road network...")
     G = get_simplified_road_network()
     
-    
+    # Save for future use
     try:
         print(f"Saving road network to {GRAPH_CACHE_FILE}")
-        nx.readwrite.gpickle.write_gpickle(G, GRAPH_CACHE_FILE)
+        with open(GRAPH_CACHE_FILE, 'wb') as f:
+            pickle.dump(G, f)
     except Exception as e:
         print(f"Error saving road network: {str(e)}")
     
     return G
+
 def create_route_focused_map(G, stops, route, time_matrix):
     """Create a map focused just on the optimal route with time estimates"""
     center_y = G.nodes[route[0]]['y']

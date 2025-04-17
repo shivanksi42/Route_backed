@@ -408,7 +408,7 @@ def update_map_with_nodes():
     
     m.get_root().html.add_child(folium.Element(click_script))
     
-    # Save to temporary file
+
     with tempfile.NamedTemporaryFile(delete=False, suffix='.html') as tmp:
         m.save(tmp.name)
         tmp_filename = tmp.name
@@ -491,7 +491,6 @@ def update_route_map():
         
         route_map = folium.Map(location=[center_lat, center_lon], zoom_start=14)
         
-        # Add markers for depot and stops
         for i, point_id in enumerate(valid_points):
             if point_id in G.nodes():
                 color = 'green' if i == 0 and depot else 'blue'
@@ -504,8 +503,7 @@ def update_route_map():
                     popup=f"{'Depot' if i == 0 and depot else 'Stop'} ID: {point_id}"
                 ).add_to(route_map)
     
-    # Add click handler for selecting nodes
-# Add JavaScript to handle click events on the map with visual feedback
+
     click_script = """
     <script>
     document.addEventListener('DOMContentLoaded', function() {
@@ -571,10 +569,9 @@ def update_route_map():
     });
     </script>
     """
-
-    m.get_root().html.add_child(folium.Element(click_script))
     
-    # Save to temporary file
+    route_map.get_root().html.add_child(folium.Element(click_script))
+
     with tempfile.NamedTemporaryFile(delete=False, suffix='.html') as tmp:
         route_map.save(tmp.name)
         tmp_filename = tmp.name
